@@ -19,7 +19,11 @@
 #include <bluetooth/gatt.h>
 #include <misc/byteorder.h>
 
+#include <gpio.h>
+
+static struct gpio_callback gpio_cb;
 static struct bt_conn *default_conn;
+static struct bt_gatt_write_params wp = {0};
 static struct bt_gatt_discover_params discover_params;
 static u8_t uuuu[] = {
 	0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
@@ -59,6 +63,8 @@ static bool eir_found(struct bt_data *data, void *user_data)
 
 	return true;
 }
+
+
 
 static void device_found(const bt_addr_le_t *addr, s8_t rssi, u8_t type,
 			 struct net_buf_simple *ad)
@@ -186,6 +192,15 @@ void callback(struct bt_conn *conn, u8_t err, struct bt_gatt_write_params *param
 	printk("Wrote\n");
 }
 
+static void button_pressed(struct device *gpiob, struct gpio_callback *cb,
+		    u32_t pins)
+{
+	printk("Button pressed at %d\n", k_cycle_get_32());
+	if (default_conn) {
+		bt_gatt_write(default_conn, &wp);
+	}
+}
+
 void main(void)
 {
 	int err;
@@ -206,17 +221,44 @@ void main(void)
 		return;
 	}
 	printk("Scanning successfully started\n");
-	struct bt_gatt_write_params wp = {0};
-	u8_t data[] = {0x01, 0x02};
+
+	struct device *gpiob = device_get_binding("GPIO_0");
+	if (!gpiob) {
+		printk("error\n");
+		return;
+	}
+
+	static u8_t data[] = {0x01, 0x02};
 	wp.handle = 21;
 	wp.func = callback;
 	wp.data = data;
 	wp.length = 2;
+
+	gpio_pin_configure(gpiob, 11,
+			   GPIO_DIR_IN | GPIO_INT |  GPIO_PUD_PULL_UP | GPIO_INT_EDGE);
+
+	gpio_init_callback(&gpio_cb, button_pressed, BIT(11));
+
+	gpio_add_callback(gpiob, &gpio_cb);
+	gpio_pin_enable_callback(gpiob, 11);
+	/*
+	gpio_pin_configure(gpiob, 5,
+			   GPIO_DIR_OUT);
+	gpio_pin_write(gpiob, 5, 0);
+
+	gpio_pin_configure(gpiob, 6,
+			   GPIO_DIR_OUT);
+	gpio_pin_write(gpiob, 6, 0);
+
+	gpio_pin_configure(gpiob, 7,
+			   GPIO_DIR_OUT);
+	gpio_pin_write(gpiob, 7, 0);
+	*/
+	printk("gpio setup\n");
+	
+
+	
 	while(1) {
 		k_sleep(2000);
-		if (default_conn) {
-			bt_gatt_write(default_conn, &wp);
-		}
-		printk("loop");
 	}
 }
