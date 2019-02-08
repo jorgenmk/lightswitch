@@ -79,8 +79,7 @@ static struct bt_gatt_attr vnd_attrs[] = {
 	/* Vendor Primary Service Declaration */
 	BT_GATT_PRIMARY_SERVICE(&vnd_uuid),
 	BT_GATT_CHARACTERISTIC(&vnd_enc_uuid.uuid,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE |
-			       BT_GATT_CHRC_INDICATE,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
 			       BT_GATT_PERM_READ |
 			       BT_GATT_PERM_WRITE,
 			       read_vnd, write_vnd, vnd_value)
@@ -142,11 +141,11 @@ static void bt_ready(int err)
 
 void main(void)
 {
+	int err;
 	k_delayed_work_init(&work, stop);
 	pwm = device_get_binding("PWM_0");
-	int err = pwm_pin_set_usec(pwm, 8,
-			   20000, 1300);
-	printk("dev: %p\n", pwm);
+	
+
 	err = bt_enable(bt_ready);
 	if (err) {
 		printk("Bluetooth init failed (err %d)\n", err);
@@ -154,11 +153,8 @@ void main(void)
 	}
 
 	bt_conn_cb_register(&conn_callbacks);
-	//bt_conn_auth_cb_register(&auth_cb_display);
-
-	/* Implement notification. At the moment there is no suitable way
-	 * of starting delayed work so we do it here
-	 */
+	err = pwm_pin_set_usec(pwm, 8,
+			   20000, 1300);
 	while (1) {
 		k_sleep(MSEC_PER_SEC);
 	}
