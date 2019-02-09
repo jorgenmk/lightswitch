@@ -20,9 +20,13 @@
 #include <misc/byteorder.h>
 
 #include <gpio.h>
+#include <pwm.h>
 
+#include "connection.h"
+
+static struct device *pwm;
 static struct gpio_callback gpio_cb;
-static struct bt_conn *default_conn;
+
 static struct bt_gatt_write_params wp = {0};
 static struct bt_gatt_discover_params discover_params;
 static u8_t uuuu[] = {
@@ -36,65 +40,51 @@ static struct bt_uuid_128 uuid_c = BT_UUID_INIT_128(
 	0xf1, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
 	0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
 
-static bool eir_found(struct bt_data *data, void *user_data)
+static const char target[] = "Switch";
+
+static ssize_t read_vnd(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			void *buf, u16_t len, u16_t offset)
 {
-	bt_addr_le_t *addr = user_data;
+	const char *value = attr->user_data;
 
-	switch (data->type) {
-	case BT_DATA_UUID128_ALL:
-		for (int i = 0; i < 8; i++) {
-			printk("%x,", data->data[i]);
-		}
-		printk(" len: %d\n", data->data_len);
-		if (memcmp(data->data, uuuu, sizeof(uuuu)) == 0) {
-			printk("Match\n");
-			bt_le_scan_stop();
-			default_conn = bt_conn_create_le(addr,
-							 BT_LE_CONN_PARAM_DEFAULT);
-		}
-		//memcpy(buf, data->data, data->data_len);
-		//printk("name: %s\n", buf);
-/*		
-			default_conn = bt_conn_create_le(addr,
-							 BT_LE_CONN_PARAM_DEFAULT);
-			return false;
-			*/
-	}
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, value,
+				 strlen(value));
+}
 
-	return true;
+static void stop(struct k_work *item)
+{
+	pwm_pin_set_usec(pwm, 8, 20000, 1300);
+}
+
+static struct k_delayed_work work;
+
+static ssize_t write_vnd(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			 const void *buf, u16_t len, u16_t offset,
+			 u8_t flags)
+{
+	u8_t *value = attr->user_data;
+	u8_t *pointer = (u8_t*)buf;
+	u32_t pwm_value = pointer[0] | (pointer[1] << 8);
+	printk("written: %d\n", pwm_value);
+	int err = pwm_pin_set_usec(pwm, 8,
+			   20000, 1800);
+	k_delayed_work_submit(&work, 500);
+	printk("err: %d\n", err);
+
+	return len;
 }
 
 
+static struct bt_gatt_attr vnd_attrs[] = {
+	BT_GATT_PRIMARY_SERVICE(&uuid_s),
+	BT_GATT_CHARACTERISTIC(&uuid_c.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+			       read_vnd, write_vnd, vnd_value)
+};
 
-static void device_found(const bt_addr_le_t *addr, s8_t rssi, u8_t type,
-			 struct net_buf_simple *ad)
-{
-	char addr_str[BT_ADDR_LE_STR_LEN];
+static struct bt_gatt_service vnd_svc = BT_GATT_SERVICE(vnd_attrs);
 
-	if (default_conn) {
-		return;
-	}
-
-	/* We're only interested in connectable events */
-	if (type != BT_LE_ADV_IND && type != BT_LE_ADV_DIRECT_IND) {
-		return;
-	}
-
-	bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
-	//printk("Device found: %s (RSSI %d)\n", addr_str, rssi);
-	bt_data_parse(ad, eir_found, (void *)addr);
-	/* connect only to devices in close proximity */
-	if (rssi < -40) {
-		return;
-	}
-
-	if (bt_le_scan_stop()) {
-		return;
-
-	}
-	
-	//default_conn = bt_conn_create_le(addr, BT_LE_CONN_PARAM_DEFAULT);
-}
 
 static u8_t discover_func(struct bt_conn *conn,
 			     const struct bt_gatt_attr *attr,
@@ -130,61 +120,6 @@ static u8_t discover_func(struct bt_conn *conn,
 	return BT_GATT_ITER_STOP;
 }
 
-static void connected(struct bt_conn *conn, u8_t err)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
-	if (err) {
-		printk("Failed to connect to %s (%u)\n", addr, err);
-		return;
-	}
-
-	printk("Connected: %s\n", addr);
-	if (conn == default_conn) {
-		//memcpy(&uuid, BT_UUID_HRS, sizeof(uuid));
-		discover_params.uuid = &uuid_s.uuid;
-		discover_params.func = discover_func;
-		discover_params.start_handle = 0x0001;
-		discover_params.end_handle = 0xffff;
-		discover_params.type = BT_GATT_DISCOVER_PRIMARY;
-
-		err = bt_gatt_discover(default_conn, &discover_params);
-		if (err) {
-			printk("Discover failed(err %d)\n", err);
-			return;
-		}
-	}
-}
-
-static void disconnected(struct bt_conn *conn, u8_t reason)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-	int err;
-
-	if (conn != default_conn) {
-		return;
-	}
-
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
-	printk("Disconnected: %s (reason %u)\n", addr, reason);
-
-	bt_conn_unref(default_conn);
-	default_conn = NULL;
-
-	/* This demo doesn't require active scan */
-	err = bt_le_scan_start(BT_LE_SCAN_PASSIVE, device_found);
-	if (err) {
-		printk("Scanning failed to start (err %d)\n", err);
-	}
-}
-
-static struct bt_conn_cb conn_callbacks = {
-		.connected = connected,
-		.disconnected = disconnected,
-};
 
 
 void callback(struct bt_conn *conn, u8_t err, struct bt_gatt_write_params *params)
@@ -201,11 +136,8 @@ static void button_pressed(struct device *gpiob, struct gpio_callback *cb,
 	}
 }
 
-void main(void)
+static void bt_ready(int err)
 {
-	int err;
-
-	err = bt_enable(NULL);
 	if (err) {
 		printk("Bluetooth init failed (err %d)\n", err);
 		return;
@@ -213,14 +145,29 @@ void main(void)
 
 	printk("Bluetooth initialized\n");
 
-	bt_conn_cb_register(&conn_callbacks);
+	bt_gatt_service_register(&vnd_svc);
 
-	err = bt_le_scan_start(BT_LE_SCAN_ACTIVE, device_found);
+	err = bt_le_scan_start(BT_LE_SCAN_ACTIVE, connection_device_found);
 	if (err) {
 		printk("Scanning failed to start (err %d)\n", err);
 		return;
 	}
 	printk("Scanning successfully started\n");
+}
+
+void main(void)
+{
+	int err;
+	init_connection();
+	err = bt_enable(bt_ready);
+	if (err) {
+		printk("Bluetooth init failed (err %d)\n", err);
+		return;
+	}
+
+	printk("Bluetooth initialized\n");
+
+	
 
 	struct device *gpiob = device_get_binding("GPIO_0");
 	if (!gpiob) {
@@ -241,19 +188,7 @@ void main(void)
 
 	gpio_add_callback(gpiob, &gpio_cb);
 	gpio_pin_enable_callback(gpiob, 11);
-	/*
-	gpio_pin_configure(gpiob, 5,
-			   GPIO_DIR_OUT);
-	gpio_pin_write(gpiob, 5, 0);
 
-	gpio_pin_configure(gpiob, 6,
-			   GPIO_DIR_OUT);
-	gpio_pin_write(gpiob, 6, 0);
-
-	gpio_pin_configure(gpiob, 7,
-			   GPIO_DIR_OUT);
-	gpio_pin_write(gpiob, 7, 0);
-	*/
 	printk("gpio setup\n");
 	
 
