@@ -22,119 +22,95 @@
 #include <gpio.h>
 #include <pwm.h>
 
-#include "connection.h"
-
+static struct bt_conn *default_conn;
 static struct device *pwm;
-static struct gpio_callback gpio_cb;
 
-static struct bt_gatt_write_params wp = {0};
-static struct bt_gatt_discover_params discover_params;
-static u8_t uuuu[] = {
-	0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
-	0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12};
-static struct bt_uuid_128 uuid_s = BT_UUID_INIT_128(
-	0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
-	0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
+static struct k_delayed_work work;
+static u8_t target_name[] = "Lightswitch";
 
-static struct bt_uuid_128 uuid_c = BT_UUID_INIT_128(
-	0xf1, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
-	0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
-
-static const char target[] = "Switch";
-
-static ssize_t read_vnd(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			void *buf, u16_t len, u16_t offset)
-{
-	const char *value = attr->user_data;
-
-	return bt_gatt_attr_read(conn, attr, buf, len, offset, value,
-				 strlen(value));
-}
 
 static void stop(struct k_work *item)
 {
 	pwm_pin_set_usec(pwm, 8, 20000, 1300);
 }
 
-static struct k_delayed_work work;
-
-static ssize_t write_vnd(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			 const void *buf, u16_t len, u16_t offset,
-			 u8_t flags)
+static bool eir_found(struct bt_data *data, void *user_data)
 {
-	u8_t *value = attr->user_data;
-	u8_t *pointer = (u8_t*)buf;
-	u32_t pwm_value = pointer[0] | (pointer[1] << 8);
-	printk("written: %d\n", pwm_value);
-	int err = pwm_pin_set_usec(pwm, 8,
-			   20000, 1800);
-	k_delayed_work_submit(&work, 500);
-	printk("err: %d\n", err);
-
-	return len;
+	bt_addr_le_t *addr = user_data;
+	switch (data->type) {
+	case BT_DATA_NAME_SHORTENED:
+	case BT_DATA_NAME_COMPLETE:
+		if (memcmp(data->data, target_name, data->data_len) == 0) {
+			printk("Match\n");
+			default_conn = bt_conn_create_le(addr,
+							 BT_LE_CONN_PARAM_DEFAULT);
+			return false;
+		}
+        else {
+            printk("name: %s\n", data->data);
+        }
+	}
+	return true;
 }
 
-
-static struct bt_gatt_attr vnd_attrs[] = {
-	BT_GATT_PRIMARY_SERVICE(&uuid_s),
-	BT_GATT_CHARACTERISTIC(&uuid_c.uuid,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
-			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
-			       read_vnd, write_vnd, vnd_value)
-};
-
-static struct bt_gatt_service vnd_svc = BT_GATT_SERVICE(vnd_attrs);
-
-
-static u8_t discover_func(struct bt_conn *conn,
-			     const struct bt_gatt_attr *attr,
-			     struct bt_gatt_discover_params *params)
+void connection_device_found(const bt_addr_le_t *addr, s8_t rssi, u8_t type,
+			 struct net_buf_simple *ad)
 {
+	char addr_str[BT_ADDR_LE_STR_LEN];
+
+	/* We're only interested in connectable events */
+	if (type != BT_LE_ADV_IND && type != BT_LE_ADV_DIRECT_IND) {
+		return;
+	}
+
+	bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
+	printk("Device found: %s (RSSI %d)\n", addr_str, rssi);
+	bt_data_parse(ad, eir_found, (void *)addr);
+}
+
+static void connected(struct bt_conn *conn, u8_t err)
+{
+	char addr[BT_ADDR_LE_STR_LEN];
+
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+	if (err) {
+		printk("Failed to connect to %s (%u)\n", addr, err);
+		return;
+	}
+	printk("Switch\n");
+	err = pwm_pin_set_usec(pwm, 8,
+			   20000, 1800);
+	if (err < 0) {
+		printk("Failed to pwm_pin_set_usec\n");
+		return;
+	}
+	k_delayed_work_submit(&work, 500);
+	bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+	
+}
+
+static void disconnected(struct bt_conn *conn, u8_t reason)
+{
+	char addr[BT_ADDR_LE_STR_LEN];
 	int err;
 
-	if (!attr) {
-		printk("Discover complete\n");
-		(void)memset(params, 0, sizeof(*params));
-		return BT_GATT_ITER_STOP;
+	if (conn != default_conn) {
+		return;
 	}
 
-	printk("[ATTRIBUTE] handle %u\n", attr->handle);
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
-	if (!bt_uuid_cmp(discover_params.uuid, (struct bt_uuid*)&uuid_c)) {
-		printk("HIT\n");
-		//memcpy(&uuid, BT_UUID_HRS_MEASUREMENT, sizeof(uuid));
-		discover_params.uuid = &uuid_c.uuid;
-		discover_params.start_handle = attr->handle + 1;
-		discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+	printk("Disconnected: %s (reason %u)\n", addr, reason);
 
-		err = bt_gatt_discover(conn, &discover_params);
-		if (err) {
-			printk("Discover failed (err %d)\n", err);
-		}
-
-	}else{
-
-		return BT_GATT_ITER_STOP;
-	}
-
-	return BT_GATT_ITER_STOP;
+	bt_conn_unref(conn);
+	conn = NULL;
 }
 
-
-
-void callback(struct bt_conn *conn, u8_t err, struct bt_gatt_write_params *params)
-{
-	printk("Wrote\n");
-}
-
-static void button_pressed(struct device *gpiob, struct gpio_callback *cb,
-		    u32_t pins)
-{
-	printk("Button pressed at %d\n", k_cycle_get_32());
-	if (default_conn) {
-		bt_gatt_write(default_conn, &wp);
-	}
-}
+static struct bt_conn_cb conn_callbacks = {
+		.connected = connected,
+		.disconnected = disconnected,
+};
 
 static void bt_ready(int err)
 {
@@ -145,8 +121,7 @@ static void bt_ready(int err)
 
 	printk("Bluetooth initialized\n");
 
-	bt_gatt_service_register(&vnd_svc);
-
+	bt_conn_cb_register(&conn_callbacks);
 	err = bt_le_scan_start(BT_LE_SCAN_ACTIVE, connection_device_found);
 	if (err) {
 		printk("Scanning failed to start (err %d)\n", err);
@@ -158,7 +133,16 @@ static void bt_ready(int err)
 void main(void)
 {
 	int err;
-	init_connection();
+	k_delayed_work_init(&work, stop);
+	pwm = device_get_binding("PWM_0");
+	if (pwm) {
+		err = pwm_pin_set_usec(pwm, 8,
+				20000, 1300);
+	}
+	if (err < 0) {
+		printk("pwm_pin_set_usec failed (err %d)\n", err);
+		return;
+	}
 	err = bt_enable(bt_ready);
 	if (err) {
 		printk("Bluetooth init failed (err %d)\n", err);
@@ -166,28 +150,7 @@ void main(void)
 	}
 
 	printk("Bluetooth initialized\n");
-
 	
-
-	struct device *gpiob = device_get_binding("GPIO_0");
-	if (!gpiob) {
-		printk("error\n");
-		return;
-	}
-
-	static u8_t data[] = {0x01, 0x02};
-	wp.handle = 21;
-	wp.func = callback;
-	wp.data = data;
-	wp.length = 2;
-
-	gpio_pin_configure(gpiob, 11,
-			   GPIO_DIR_IN | GPIO_INT |  GPIO_PUD_PULL_UP | GPIO_INT_EDGE);
-
-	gpio_init_callback(&gpio_cb, button_pressed, BIT(11));
-
-	gpio_add_callback(gpiob, &gpio_cb);
-	gpio_pin_enable_callback(gpiob, 11);
 
 	printk("gpio setup\n");
 	

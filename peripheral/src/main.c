@@ -23,8 +23,8 @@
 #include <bluetooth/gatt.h>
 
 #include <pwm.h>
+static struct gpio_callback gpio_cb;
 
-static struct device *pwm;
 /* Custom Service Variables */
 static struct bt_uuid_128 vnd_uuid = BT_UUID_INIT_128(
 	0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
@@ -43,11 +43,6 @@ static ssize_t read_vnd(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, value,
 				 strlen(value));
-}
-
-static void stop(struct k_work *item)
-{
-	pwm_pin_set_usec(pwm, 8, 20000, 1300);
 }
 
 static struct k_delayed_work work;
@@ -79,10 +74,9 @@ static struct bt_gatt_attr vnd_attrs[] = {
 	/* Vendor Primary Service Declaration */
 	BT_GATT_PRIMARY_SERVICE(&vnd_uuid),
 	BT_GATT_CHARACTERISTIC(&vnd_enc_uuid.uuid,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
-			       BT_GATT_PERM_READ |
-			       BT_GATT_PERM_WRITE,
-			       read_vnd, write_vnd, vnd_value)
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+			       read_vnd, write_vnd, NULL)
 };
 
 static struct bt_gatt_service vnd_svc = BT_GATT_SERVICE(vnd_attrs);
@@ -100,14 +94,21 @@ static void connected(struct bt_conn *conn, u8_t err)
 {
 	if (err) {
 		printk("Connection failed (err %u)\n", err);
+		return;
 	} else {
 		printk("Connected\n");
 	}
+	bt_le_adv_stop();
 }
 
 static void disconnected(struct bt_conn *conn, u8_t reason)
 {
 	printk("Disconnected (reason %u)\n", reason);
+	err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
+	if (err) {
+		printk("Advertising failed to start (err %d)\n", err);
+		return;
+	}
 }
 
 static struct bt_conn_cb conn_callbacks = {
@@ -142,9 +143,19 @@ static void bt_ready(int err)
 void main(void)
 {
 	int err;
-	k_delayed_work_init(&work, stop);
-	pwm = device_get_binding("PWM_0");
-	
+	struct device *gpiob = device_get_binding("GPIO_0");
+	if (!gpiob) {
+		printk("error\n");
+		return;
+	}
+
+	gpio_pin_configure(gpiob, 11,
+			   GPIO_DIR_IN | GPIO_INT |  GPIO_PUD_PULL_UP | GPIO_INT_EDGE);
+
+	gpio_init_callback(&gpio_cb, button_pressed, BIT(11));
+
+	gpio_add_callback(gpiob, &gpio_cb);
+	gpio_pin_enable_callback(gpiob, 11);
 
 	err = bt_enable(bt_ready);
 	if (err) {
@@ -153,8 +164,7 @@ void main(void)
 	}
 
 	bt_conn_cb_register(&conn_callbacks);
-	err = pwm_pin_set_usec(pwm, 8,
-			   20000, 1300);
+
 	while (1) {
 		k_sleep(MSEC_PER_SEC);
 	}
